@@ -5,52 +5,29 @@ from pubmed_fetcher.utils import is_non_academic_affiliation, extract_email
 
 BASE_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/"
 
-def fetch_and_process_papers(query: str, debug: bool = False) -> List[Dict]:
-    ids = fetch_pubmed_ids(query)
-    papers = fetch_pubmed_details(ids)
-    results = []
-
-    for paper in papers:
-        non_academic_authors = []
-        company_affiliations = []
-        corresponding_email = ""
-
-        for author in paper.get("authors", []):
-            affil = author.get("affiliation", "")
-            name = author.get("name", "")
-            if is_non_academic_affiliation(affil):
-                non_academic_authors.append(name)
-                company_affiliations.append(affil)
-                email = extract_email(affil)
-                if email:
-                    corresponding_email = email
-
-        if non_academic_authors:
-            results.append({
-                "PubmedID": paper["pmid"],
-                "Title": paper["title"],
-                "Publication Date": paper["pub_date"],
-                "Non-academic Author(s)": "; ".join(non_academic_authors),
-                "Company Affiliation(s)": "; ".join(set(company_affiliations)),
-                "Corresponding Author Email": corresponding_email,
-            })
-            if debug:
-                print(f"DEBUG: {paper['pmid']} - Non-academic authors found.")
-
-    return results
-
 def fetch_pubmed_ids(query: str) -> List[str]:
+    """
+    Fetch PubMed IDs for a given query.
+    """
     params = {
         "db": "pubmed",
         "term": query,
-        "retmax": 50,
+        "retmax": 100,
         "retmode": "json"
     }
     response = requests.get(BASE_URL + "esearch.fcgi", params=params)
     response.raise_for_status()
-    return response.json()["esearchresult"]["idlist"]
+    data = response.json()
+    return data.get("esearchresult", {}).get("idlist", [])
 
 def fetch_pubmed_details(ids: List[str]) -> List[Dict]:
+    """
+    Fetch detailed PubMed article data using a list of PubMed IDs.
+    """
+    if not ids:
+        print("⚠️ No PubMed IDs provided. Skipping fetch.")
+        return []
+
     params = {
         "db": "pubmed",
         "id": ",".join(ids),
@@ -58,25 +35,74 @@ def fetch_pubmed_details(ids: List[str]) -> List[Dict]:
     }
     response = requests.get(BASE_URL + "efetch.fcgi", params=params)
     response.raise_for_status()
-    soup = BeautifulSoup(response.text, "lxml")
-    articles = soup.find_all("pubmedarticle")
+    soup = BeautifulSoup(response.text, "xml")
+
+    articles = soup.find_all("PubmedArticle")
     results = []
+
     for article in articles:
-        pmid = article.pmid.text
-        title = article.find("articletitle").text
-        pub_date = article.find("pubdate").text if article.find("pubdate") else "N/A"
-        authors = []
-        for author in article.find_all("author"):
-            name = f"{author.find('lastname', '').text if author.find('lastname') else ''} {author.find('forename', '').text if author.find('forename') else ''}"
-            affiliation = author.find("affiliation")
-            authors.append({
-                "name": name.strip(),
-                "affiliation": affiliation.text if affiliation else ""
+        try:
+            pmid_tag = article.find("PMID")
+            pmid = pmid_tag.text.strip() if pmid_tag else "N/A"
+
+            title_tag = article.find("ArticleTitle")
+            title = title_tag.text.strip() if title_tag else "No Title"
+
+            pub_date_tag = article.find("PubDate")
+            pub_date = pub_date_tag.text.strip() if pub_date_tag else "N/A"
+
+            authors = []
+            for author in article.find_all("Author"):
+                last_name_tag = author.find("LastName")
+                forename_tag = author.find("ForeName")
+                name = f"{forename_tag.text.strip() if forename_tag else ''} {last_name_tag.text.strip() if last_name_tag else ''}".strip()
+
+                affiliation_info = author.find("AffiliationInfo")
+                affiliation = ""
+                if affiliation_info:
+                    aff_tag = affiliation_info.find("Affiliation")
+                    affiliation = aff_tag.text.strip() if aff_tag else ""
+
+                email = extract_email(affiliation)
+
+                authors.append({
+                    "name": name,
+                    "affiliation": affiliation,
+                    "email": email
+                })
+
+            results.append({
+                "pmid": pmid,
+                "title": title,
+                "pub_date": pub_date,
+                "authors": authors
             })
-        results.append({
-            "pmid": pmid,
-            "title": title,
-            "pub_date": pub_date,
-            "authors": authors
-        })
+        except Exception as e:
+            print(f"⚠️ Skipping one article due to error: {e}")
+            continue
+
     return results
+
+def fetch_and_process_papers(query: str, debug: bool = False) -> List[Dict]:
+    """
+    Fetch and process PubMed papers for a given query.
+    Returns only those papers with at least one non-academic affiliation.
+    """
+    ids = fetch_pubmed_ids(query)
+    if debug:
+        print(f"🔍 Found {len(ids)} papers for query: '{query}'")
+
+    papers = fetch_pubmed_details(ids)
+
+    # Filter papers with at least one author having a non-academic affiliation
+    filtered = []
+    for paper in papers:
+        for author in paper["authors"]:
+            if is_non_academic_affiliation(author["affiliation"]):
+                filtered.append(paper)
+                break
+
+    if debug:
+        print(f"✅ Filtered down to {len(filtered)} papers with at least one non-academic affiliation")
+
+    return filtered
